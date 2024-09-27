@@ -7,6 +7,7 @@ import argparse
 import sys
 import random
 from datetime import datetime
+import stat
 
 
 def calculate_checksum(nmea_sentence):
@@ -66,38 +67,73 @@ def generate_nmea_sentences():
         time.sleep(1)  # Interval between sentences
 
 
-def serial_writer_pipe(pipe_path, interval):
+def serial_writer_pipe(pipe_path, interval, shutdown_event):
     """Write NMEA sentences to the named pipe."""
     nmea_gen = generate_nmea_sentences()
     try:
-        while True:
-            sentence = next(nmea_gen)
-            with open(pipe_path, 'w') as pipe:
-                pipe.write(sentence)
-            print(f"Sent to pipe: {sentence.strip()}")
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        print("\nStopping GNSS simulator.")
-    except BrokenPipeError:
-        print("Reader closed the pipe. Exiting.")
+        with open(pipe_path, 'w') as pipe:
+            while not shutdown_event.is_set():
+                sentence = next(nmea_gen)
+                try:
+                    pipe.write(sentence)
+                    pipe.flush()  # Ensure data is written immediately
+                    print(f"Sent to pipe: {sentence.strip()}")
+                except BrokenPipeError:
+                    print("Reader closed the pipe. Exiting.")
+                    shutdown_event.set()
+                    break
+                time.sleep(interval)
+    except Exception as e:
+        print(f"Error writing to pipe: {e}")
     finally:
-        print("Simulation ended.")
+        print("Pipe writer thread exiting.")
 
 
-def serial_writer_pty(master_fd, interval):
+def serial_writer_serial(serial_port, interval, shutdown_event):
+    """Write NMEA sentences to the specified serial port."""
+    nmea_gen = generate_nmea_sentences()
+    try:
+        with open(serial_port, 'w') as ser:
+            while not shutdown_event.is_set():
+                sentence = next(nmea_gen)
+                try:
+                    ser.write(sentence)
+                    ser.flush()
+                    print(f"Sent to serial port: {sentence.strip()}")
+                except BrokenPipeError:
+                    print("Reader closed the serial port. Exiting.")
+                    shutdown_event.set()
+                    break
+                time.sleep(interval)
+    except Exception as e:
+        print(f"Error writing to serial port: {e}")
+    finally:
+        print("Serial port writer thread exiting.")
+
+
+def serial_writer_pty(master_fd, interval, shutdown_event):
     """Write NMEA sentences to the virtual serial port."""
     nmea_gen = generate_nmea_sentences()
     try:
-        while True:
+        while not shutdown_event.is_set():
             sentence = next(nmea_gen)
-            os.write(master_fd, sentence.encode("ascii"))
-            print(f"Sent to PTY: {sentence.strip()}")
+            try:
+                os.write(master_fd, sentence.encode("ascii"))
+                print(f"Sent to PTY: {sentence.strip()}")
+            except OSError as e:
+                print(f"Error writing to PTY: {e}")
+                shutdown_event.set()
+                break
             time.sleep(interval)
-    except KeyboardInterrupt:
-        print("\nStopping GNSS simulator.")
+    except Exception as e:
+        print(f"Error in PTY writer: {e}")
     finally:
-        os.close(master_fd)
-        print("Serial port closed.")
+        try:
+            os.close(master_fd)
+            print("Serial port closed.")
+        except Exception as e:
+            print(f"Error closing master FD: {e}")
+        print("PTY writer thread exiting.")
 
 
 def main():
@@ -108,6 +144,11 @@ def main():
         help="Path to the named pipe (FIFO) to write NMEA sentences",
     )
     parser.add_argument(
+        "--serial",
+        dest="serial_port",
+        help="Path to the serial port to write NMEA sentences",
+    )
+    parser.add_argument(
         "--interval",
         type=float,
         default=1.0,
@@ -116,7 +157,19 @@ def main():
 
     args = parser.parse_args()
 
-    if args.pipe_path:
+    shutdown_event = threading.Event()
+
+    if args.serial_port:
+        serial_port = args.serial_port
+        print(f"Using serial port: {serial_port}")
+
+        # Start the serial writer using the specified serial port
+        writer_thread = threading.Thread(
+            target=serial_writer_serial,
+            args=(serial_port, args.interval, shutdown_event),
+            name="SerialWriterThread"
+        )
+    elif args.pipe_path:
         pipe_path = args.pipe_path
 
         # Create the named pipe if it doesn't exist
@@ -139,8 +192,9 @@ def main():
 
         # Start the serial writer using the named pipe
         writer_thread = threading.Thread(
-            target=serial_writer_pipe, args=(
-                pipe_path, args.interval), daemon=True
+            target=serial_writer_pipe,
+            args=(pipe_path, args.interval, shutdown_event),
+            name="PipeWriterThread"
         )
     else:
         # Create a virtual serial port using PTY
@@ -153,21 +207,29 @@ def main():
 
         # Start the serial writer using the PTY
         writer_thread = threading.Thread(
-            target=serial_writer_pty, args=(
-                master_fd, args.interval), daemon=True
+            target=serial_writer_pty,
+            args=(master_fd, args.interval, shutdown_event),
+            name="PTYWriterThread"
         )
 
+    # Start the writer thread
     writer_thread.start()
 
     try:
-        while True:
-            time.sleep(1)
+        while writer_thread.is_alive():
+            writer_thread.join(timeout=1)
     except KeyboardInterrupt:
-        print("\nExiting GNSS simulator.")
+        print("\nKeyboardInterrupt received. Shutting down...")
+        shutdown_event.set()
+        writer_thread.join()
     finally:
-        if args.pipe_path and os.path.exists(pipe_path):
-            os.unlink(pipe_path)
-            print(f"Named pipe removed: {pipe_path}")
+        if args.pipe_path and os.path.exists(args.pipe_path):
+            try:
+                os.unlink(args.pipe_path)
+                print(f"Named pipe removed: {args.pipe_path}")
+            except Exception as e:
+                print(f"Error removing named pipe: {e}")
+        print("GNSS simulator exited gracefully.")
 
 
 if __name__ == "__main__":
