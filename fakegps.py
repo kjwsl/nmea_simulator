@@ -1,3 +1,4 @@
+from os.path import join
 import serial
 import os
 import time
@@ -59,11 +60,88 @@ def generate_gprmc():
     return f"${gprmc_body}*{checksum}\r\n"
 
 
+def generate_imuag():
+    """Generate a fake IMU sentence."""
+    utc_time = datetime.utcnow().strftime("%H%M%S.%f")[:-4]
+    roll = f"{random.uniform(-180, 180):.4f}"
+    pitch = f"{random.uniform(-180, 180):.4f}"
+    yaw = f"{random.uniform(-180, 180):.4f}"
+    acc_x = f"{random.uniform(-10, 10):.4f}"
+    acc_y = f"{random.uniform(-10, 10):.4f}"
+    acc_z = f"{random.uniform(-10, 10):.4f}"
+    gyro_x = f"{random.uniform(-10, 10):.4f}"
+    gyro_y = f"{random.uniform(-10, 10):.4f}"
+    gyro_z = f"{random.uniform(-10, 10):.4f}"
+    mag_x = f"{random.uniform(-10, 10):.4f}"
+    mag_y = f"{random.uniform(-10, 10):.4f}"
+    mag_z = f"{random.uniform(-10, 10):.4f}"
+    imuag_body = f"IMUAG,{utc_time},{roll},{pitch},{yaw},{acc_x},{acc_y},{acc_z},{gyro_x},{gyro_y},{gyro_z},{mag_x},{mag_y},{mag_z}"
+    checksum = calculate_checksum(imuag_body)
+    return f"${imuag_body}*{checksum}\r\n"
+
+
+def generate_gpgll():
+    """Generate a fake GPGLL sentence."""
+    latitude = f"{random.uniform(-90, 90):08.4f}"
+    ns = "N" if float(latitude) >= 0 else "S"
+    latitude = f"{abs(float(latitude)):.4f}"
+    longitude = f"{random.uniform(-180, 180):09.4f}"
+    ew = "E" if float(longitude) >= 0 else "W"
+    longitude = f"{abs(float(longitude)):.4f}"
+    utc_time = datetime.utcnow().strftime("%H%M%S.%f")[:-4]
+    gpgll_body = f"GPGLL,{latitude},{ns},{longitude},{ew},{utc_time},A"
+    checksum = calculate_checksum(gpgll_body)
+    return f"${gpgll_body}*{checksum}\r\n"
+
+
+def generate_gpgsa():
+    """Generate a fake GPGSA sentence."""
+    mode = "A"  # A = Auto, M = Manual
+    fix_type = random.choice(["1", "2", "3"])
+    prn_list = ",".join([str(random.randint(1, 32)) for _ in range(12)])
+    pdop = f"{random.uniform(1.0, 5.0):.1f}"
+    hdop = f"{random.uniform(1.0, 5.0):.1f}"
+    vdop = f"{random.uniform(1.0, 5.0):.1f}"
+    gpgsa_body = f"GPGSA,{mode},{fix_type},{prn_list},{pdop},{hdop},{vdop}"
+    checksum = calculate_checksum(gpgsa_body)
+    return f"${gpgsa_body}*{checksum}\r\n"
+
+
+def generate_gpgsv():
+    """Generate a fake GPGSV sentence."""
+    num_messages = "1"
+    message_num = "1"
+    num_satellites = "12"
+    satellite_data = []
+    for _ in range(12):
+        prn = random.randint(1, 32)
+        elevation = random.randint(0, 90)
+        azimuth = random.randint(0, 359)
+        snr = random.randint(0, 50)
+        satellite_data.append(f"{prn},{elevation},{azimuth},{snr}")
+    gpgsv_body = f"GPGSV,{num_messages},{message_num},{num_satellites}"
+    for data in satellite_data:
+        gpgsv_body += f",{data}"
+    checksum = calculate_checksum(gpgsv_body)
+    return f"${gpgsv_body}*{checksum}\r\n"
+
+
+def yield_nmea_sentences():
+    lines = []
+    lines += generate_gpgga()
+    lines += generate_gprmc()
+    lines += generate_gpgll()
+    lines += generate_gpgsa()
+    lines += generate_gpgsv()
+    lines += generate_imuag()
+    lines += "\r\n"
+    return ''.join(lines)
+
+
 def generate_nmea_sentences():
     """Generator for NMEA sentences."""
     while True:
-        yield generate_gpgga()
-        yield generate_gprmc()
+        yield yield_nmea_sentences()
         time.sleep(1)  # Interval between sentences
 
 
