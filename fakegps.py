@@ -1,5 +1,3 @@
-from os.path import join
-import serial
 import os
 import time
 import threading
@@ -17,6 +15,53 @@ def calculate_checksum(nmea_sentence):
     for char in nmea_sentence:
         checksum ^= ord(char)
     return f"{checksum:02X}"
+
+
+def generate_nfimu():
+    """Generate a fake NFIMU sentence."""
+
+    calibration_status = random.randint(0, 1)
+    temperature = f"{random.uniform(10, 80):.4f}"
+    # Accelerometer values are in m/s^2
+    acc_x = random.uniform(-100, 100)
+    acc_y = random.uniform(-100, 100)
+    acc_z = random.uniform(-100, 100)
+
+    # Gyroscope values are in rad/s
+    gyro_x = random.uniform(-2*3.14, 2*3.14)
+    gyro_y = random.uniform(-2*3.14, 2*3.14)
+    gyro_z = random.uniform(-2*3.14, 2*3.14)
+
+    if calibration_status == 1:
+        # Accel, gyro values in the vehicle frame
+        veh_acc_x = f"{acc_x + random.uniform(-10, 10):.4f}"
+        veh_acc_y = f"{acc_y + random.uniform(-10, 10):.4f}"
+        veh_acc_z = f"{acc_z + random.uniform(-10, 10):.4f}"
+
+        # Simulating 10% of difference
+        veh_gyro_x = f"{gyro_x + random.uniform(-2*3.14*0.1, 2*3.14*0.1):.4f}"
+        veh_gyro_y = f"{gyro_y + random.uniform(-2*3.14*0.1, 2*3.14*0.1):.4f}"
+        veh_gyro_z = f"{gyro_z + random.uniform(-2*3.14*0.1, 2*3.14*0.1):.4f}"
+    else:
+        veh_acc_x = ''
+        veh_acc_y = ''
+        veh_acc_z = ''
+        veh_gyro_x = ''
+        veh_gyro_y = ''
+        veh_gyro_z = ''
+
+    acc_y = f"{acc_y:.4f}"
+    acc_x = f"{acc_x:.4f}"
+    acc_z = f"{acc_z:.4f}"
+
+    # Gyrosc
+    gyro_x = f"{gyro_x:.4f}"
+    gyro_y = f"{gyro_y:.4f}"
+    gyro_z = f"{gyro_z:.4f}"
+
+    nfimu_body = f"NFIMU,{calibration_status},{temperature},{acc_x},{acc_y},{acc_z},{gyro_x},{gyro_y},{gyro_z},{veh_acc_x},{veh_acc_y},{veh_acc_z},{veh_gyro_x},{veh_gyro_y},{veh_gyro_z}"
+    checksum = calculate_checksum(nfimu_body)
+    return f"${nfimu_body}*{checksum}\r\n"
 
 
 def generate_gpgga():
@@ -72,10 +117,7 @@ def generate_imuag():
     gyro_x = f"{random.uniform(-10, 10):.4f}"
     gyro_y = f"{random.uniform(-10, 10):.4f}"
     gyro_z = f"{random.uniform(-10, 10):.4f}"
-    mag_x = f"{random.uniform(-10, 10):.4f}"
-    mag_y = f"{random.uniform(-10, 10):.4f}"
-    mag_z = f"{random.uniform(-10, 10):.4f}"
-    imuag_body = f"IMUAG,{utc_time},{roll},{pitch},{yaw},{acc_x},{acc_y},{acc_z},{gyro_x},{gyro_y},{gyro_z},{mag_x},{mag_y},{mag_z}"
+    imuag_body = f"IMUAG,{utc_time},{roll},{pitch},{yaw},{acc_x},{acc_y},{acc_z},{gyro_x},{gyro_y},{gyro_z}"
     checksum = calculate_checksum(imuag_body)
     return f"${imuag_body}*{checksum}\r\n"
 
@@ -128,13 +170,12 @@ def generate_gpgsv():
 
 def yield_nmea_sentences():
     lines = []
-    lines += generate_gpgga()
-    lines += generate_gprmc()
-    lines += generate_gpgll()
-    lines += generate_gpgsa()
-    lines += generate_gpgsv()
-    lines += generate_imuag()
-    lines += "\r\n"
+    lines += generate_gpgga() + "\r\n"
+    lines += generate_gprmc() + "\r\n"
+    lines += generate_gpgll() + "\r\n"
+    lines += generate_gpgsa() + "\r\n"
+    lines += generate_gpgsv() + "\r\n"
+    lines += generate_nfimu() + "\r\n"
     return ''.join(lines)
 
 
