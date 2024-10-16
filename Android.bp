@@ -1,11 +1,7 @@
 cc_binary {
-    name: "fakgps",
-    srcs: ["fakgps.c"],
-    shared_libs: [
-        "libcutils",
-    ],
+    name: "fakegps",
+    srcs: ["fakegps.c"],
     static_executable: true,
     installable: true,
-    vendor: true,
 }
 
