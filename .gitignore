@@ -10,3 +10,9 @@
 pyvenv.cfg
 .venv
 pip-selfcheck.json
+build/.cmake/api/v1/reply/index-2024-10-23T07-35-12-0269.json
+build/CMakeFiles
+build/CMakeCache.txt
+build/Makefile
+build/cmake_install.cmake
+build/fakegps
