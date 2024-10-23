@@ -11,6 +11,9 @@ import stat
 script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(script_dir, "lib"))
 
+latlng_str = ""
+active_num_satellites: int = 0
+
 
 def calculate_checksum(nmea_sentence):
     """Calculate NMEA sentence checksum."""
@@ -76,34 +79,32 @@ def generate_gpgga():
     longitude = f"{random.uniform(-180, 180):09.4f}"
     ew = "E" if float(longitude) >= 0 else "W"
     longitude = f"{abs(float(longitude)):.4f}"
+    global latlng_str
+    latlng_str = f"{latitude},{ns},{longitude},{ew}"
     fix_quality = random.choice(["0", "1", "2", "4", "5"])
-    num_satellites = f"{random.randint(3, 12):02}"
+    global active_num_satellites
+    active_num_satellites = f"{random.randint(3, 12):02}"
     horizontal_dil = f"{random.uniform(0.5, 2.5):.1f}"
     altitude = f"{random.uniform(10.0, 100.0):.1f}"
     altitude_units = "M"
     geoid_sep = f"{random.uniform(-50.0, 50.0):.1f}"
     geoid_units = "M"
-    gpgga_body = f"GPGGA,{utc_time},{latitude},{ns},{longitude},{ew},{fix_quality},{num_satellites},{horizontal_dil},{altitude},{altitude_units},{geoid_sep},{geoid_units},,,"
+    gpgga_body = f"GPGGA,{utc_time},{latlng_str},{fix_quality},{active_num_satellites},{horizontal_dil},{altitude},{altitude_units},{geoid_sep},{geoid_units},,,"
     checksum = calculate_checksum(gpgga_body)
     return f"${gpgga_body}*{checksum}\r\n"
 
 
 def generate_gprmc():
     """Generate a fake GPRMC sentence."""
+    global latlng_str
     utc_time = datetime.utcnow().strftime("%H%M%S.%f")[:-4]
     status = "A"  # A = Active, V = Void
-    latitude = f"{random.uniform(-90, 90):08.4f}"
-    ns = "N" if float(latitude) >= 0 else "S"
-    latitude = f"{abs(float(latitude)):.4f}"
-    longitude = f"{random.uniform(-180, 180):09.4f}"
-    ew = "E" if float(longitude) >= 0 else "W"
-    longitude = f"{abs(float(longitude)):.4f}"
     speed_over_ground = f"{random.uniform(0, 100):05.1f}"  # knots
     course_over_ground = f"{random.uniform(0, 360):05.1f}"  # degrees
     date_str = datetime.utcnow().strftime("%d%m%y")
     magnetic_variation = ""
     mv_direction = ""
-    gprmc_body = f"GPRMC,{utc_time},{status},{latitude},{ns},{longitude},{ew},{speed_over_ground},{course_over_ground},{date_str},{magnetic_variation},{mv_direction},"
+    gprmc_body = f"GPRMC,{utc_time},{status},{latlng_str},{speed_over_ground},{course_over_ground},{date_str},{magnetic_variation},{mv_direction},"
     checksum = calculate_checksum(gprmc_body)
     return f"${gprmc_body}*{checksum}\r\n"
 
@@ -127,14 +128,9 @@ def generate_imuag():
 
 def generate_gpgll():
     """Generate a fake GPGLL sentence."""
-    latitude = f"{random.uniform(-90, 90):08.4f}"
-    ns = "N" if float(latitude) >= 0 else "S"
-    latitude = f"{abs(float(latitude)):.4f}"
-    longitude = f"{random.uniform(-180, 180):09.4f}"
-    ew = "E" if float(longitude) >= 0 else "W"
-    longitude = f"{abs(float(longitude)):.4f}"
+    global latlng_str
     utc_time = datetime.utcnow().strftime("%H%M%S.%f")[:-4]
-    gpgll_body = f"GPGLL,{latitude},{ns},{longitude},{ew},{utc_time},A"
+    gpgll_body = f"GPGLL,{latlng_str},{utc_time},A"
     checksum = calculate_checksum(gpgll_body)
     return f"${gpgll_body}*{checksum}\r\n"
 
@@ -142,8 +138,10 @@ def generate_gpgll():
 def generate_gpgsa():
     """Generate a fake GPGSA sentence."""
     mode = "A"  # A = Auto, M = Manual
-    fix_type = random.choice(["1", "2", "3"])
-    prn_list = ",".join([str(random.randint(1, 32)) for _ in range(12)])
+    fix_type = random.randint(1, 3)
+    global active_num_satellites
+    prn_list = ",".join([str(random.randint(1, 32))
+                        for _ in range(int(active_num_satellites))])
     pdop = f"{random.uniform(1.0, 5.0):.1f}"
     hdop = f"{random.uniform(1.0, 5.0):.1f}"
     vdop = f"{random.uniform(1.0, 5.0):.1f}"
@@ -154,31 +152,47 @@ def generate_gpgsa():
 
 def generate_gpgsv():
     """Generate a fake GPGSV sentence."""
-    num_messages = "1"
-    message_num = "1"
-    num_satellites = "12"
-    satellite_data = []
-    for _ in range(12):
-        prn = random.randint(1, 32)
-        elevation = random.randint(0, 90)
-        azimuth = random.randint(0, 359)
-        snr = random.randint(0, 50)
-        satellite_data.append(f"{prn},{elevation},{azimuth},{snr}")
-    gpgsv_body = f"GPGSV,{num_messages},{message_num},{num_satellites}"
-    for data in satellite_data:
-        gpgsv_body += f",{data}"
-    checksum = calculate_checksum(gpgsv_body)
-    return f"${gpgsv_body}*{checksum}\r\n"
+    MAX_SAT_PER_MESSAGE = 4
+
+    global active_num_satellites
+    total_num_satellites = random.randint(int(active_num_satellites), 12)
+    # Calculate how many GSV messages are needed
+    num_messages = (total_num_satellites + 3) // MAX_SAT_PER_MESSAGE
+    prns = list(range(1, 33))
+    output = ""
+
+    for i in range(1, num_messages + 1):
+        satellite_data = []
+        # Up to 4 satellites per message
+        num_satellites_in_message = min(
+            MAX_SAT_PER_MESSAGE, total_num_satellites - (i - 1) * MAX_SAT_PER_MESSAGE)
+
+        for _ in range(num_satellites_in_message):
+            prn = random.choice(prns)
+            prns.remove(prn)
+            elevation = random.randint(0, 90)
+            azimuth = random.randint(0, 359)
+            snr = random.randint(0, 50)
+            satellite_data.append(f"{prn},{elevation},{azimuth},{snr}")
+
+        gpgsv_body = f"GPGSV,{num_messages},{i},{total_num_satellites}"
+        for data in satellite_data:
+            gpgsv_body += f",{data}"
+
+        checksum = calculate_checksum(gpgsv_body)
+        output += f"${gpgsv_body}*{checksum}\r\n"
+
+    return output
 
 
 def yield_nmea_sentences():
     lines = []
-    lines += generate_gpgga() + "\r\n"
-    lines += generate_gprmc() + "\r\n"
-    lines += generate_gpgll() + "\r\n"
-    lines += generate_gpgsa() + "\r\n"
-    lines += generate_gpgsv() + "\r\n"
-    lines += generate_nfimu() + "\r\n"
+    lines.append(generate_gprmc())
+    lines.append(generate_gpgga())
+    lines.append(generate_gpgsa())
+    lines.append(generate_gpgsv())
+    lines.append(generate_nfimu())
+    lines.append(generate_gpgll())
     return ''.join(lines)
 
 
@@ -199,7 +213,7 @@ def serial_writer_pipe(pipe_path, interval, shutdown_event):
                 try:
                     pipe.write(sentence)
                     pipe.flush()  # Ensure data is written immediately
-                    print(f"Sent to pipe: {sentence.strip()}")
+                    print(f"Sent to pipe: \r\n{sentence.strip()}")
                 except BrokenPipeError:
                     print("Reader closed the pipe. Exiting.")
                     shutdown_event.set()
@@ -215,13 +229,13 @@ def serial_writer_serial(serial_port, interval, shutdown_event):
     """Write NMEA sentences to the specified serial port."""
     nmea_gen = generate_nmea_sentences()
     try:
-        with open(serial_port, 'w') as ser:
+        with open(serial_port, 'w') as set:
             while not shutdown_event.is_set():
                 sentence = next(nmea_gen)
                 try:
-                    ser.write(sentence)
-                    ser.flush()
-                    print(f"Sent to serial port: {sentence.strip()}")
+                    set.write(sentence)
+                    set.flush()
+                    print(f"Sent to serial port: \r\n{sentence.strip()}")
                 except BrokenPipeError:
                     print("Reader closed the serial port. Exiting.")
                     shutdown_event.set()
