@@ -4,6 +4,8 @@
 #include <iostream>
 #include <getopt.h>
 #include <cstdlib>
+#include <cerrno>
+#include <cstring>
 
 int main(int argc, char *argv[])
 {
@@ -28,16 +30,36 @@ int main(int argc, char *argv[])
             serial_port = optarg;
             break;
         case 'i':
-            try
-            {
-                interval = std::stod(optarg);
-            }
-            catch (const std::invalid_argument &)
+        {
+            char *endptr = nullptr;
+            errno = 0; // Reset errno before the call
+            double val = std::strtod(optarg, &endptr);
+
+            // Check for conversion errors
+            if (endptr == optarg)
             {
                 std::cerr << "Invalid interval value: " << optarg << std::endl;
                 return 1;
             }
+            if (errno == ERANGE)
+            {
+                std::cerr << "Interval value out of range: " << optarg << std::endl;
+                return 1;
+            }
+            // Optionally, check for trailing characters
+            while (*endptr != '\0')
+            {
+                if (!std::isspace(*endptr))
+                {
+                    std::cerr << "Invalid characters in interval value: " << optarg << std::endl;
+                    return 1;
+                }
+                ++endptr;
+            }
+
+            interval = val;
             break;
+        }
         default:
             std::cerr << "Usage: " << argv[0]
                       << " [--pipe PATH] [--serial PORT] [--interval SECONDS]" << std::endl;

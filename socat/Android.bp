@@ -4,4 +4,5 @@ cc_prebuilt_binary {
     strip: {
         none: true,
     },
+    installable: true,
 }

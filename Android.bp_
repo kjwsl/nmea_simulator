@@ -1,8 +1,0 @@
-cc_binary {
-    name: "fakegps",
-    srcs: ["fakegps.cpp"],
-    init_rc: ["fakegps.rc"],
-    static_executable: true,
-    installable: true,
-}
-

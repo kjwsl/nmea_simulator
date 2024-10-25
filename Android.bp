@@ -1,0 +1,10 @@
+cc_binary {
+    name: "nmea_simulator",
+    vendor: true,
+    srcs: [
+        "NmeaSimulator.cpp",
+        "main.cpp",
+    ],
+    installable: true,
+}
+
