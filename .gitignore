@@ -16,3 +16,5 @@ build/CMakeCache.txt
 build/Makefile
 build/cmake_install.cmake
 build/fakegps
+build/.cmake/api/v1/reply
+build/nmea_simulator

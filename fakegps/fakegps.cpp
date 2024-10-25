@@ -92,7 +92,9 @@ std::string generate_gpgga()
     char utc_time[16];
     std::strftime(utc_time, sizeof(utc_time), "%H%M%S", &tm);
 
-    double latitude = random_uniform(-90, 90);
+    int lat_deg = random_int(-359, 359);
+    double lat_min = random_uniform(0, 60);
+    double latitude = lat_deg + lat_min / 60;
     char ns = latitude >= 0 ? 'N' : 'S';
     latitude = std::abs(latitude);
 
