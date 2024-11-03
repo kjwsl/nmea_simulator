@@ -1,7 +1,8 @@
 rust_binary {
     name: "nmea_simulator",
     srcs: [
-        "src/nmea_simulator.rs",
+        "src/nmea_generator.rs",
+        "src/pty_handler.rs",
         "src/main.rs",
     ],
     edition: "2021",

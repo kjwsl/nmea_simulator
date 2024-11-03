@@ -1,40 +1,88 @@
-mod nmea_simulator;
-use nmea_simulator::NmeaSimulator;
-use std::env;
-use std::error::Error;
+// src/main.rs
 
-fn print_help_msg(program_name: &str) {
-    println!(
-        "Usage: {} [input_file] [output_file]
-        -h, --help  Display this help message",
-        program_name
-    );
-}
+mod nmea_generator;
+mod pty_handler;
+
+use nmea_generator::NmeaGenerator;
+use pty_handler::PtyHandler;
+use signal_hook::consts::SIGINT;
+use signal_hook::iterator::Signals;
+use std::error::Error;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Parse command-line arguments
-    let args: Vec<String> = env::args().collect();
-    const DEFAULT_INPUT_PATH: &str = "/tmp/gps_input";
-    const DEFAULT_OUTPUT_PATH: &str = "/tmp/gps_output";
+    let shutdown_event = Arc::new(AtomicBool::new(false));
 
-    if args.len() == 2 && (args[1] == "-h" || args[1] == "--help") {
-        print_help_msg(&args[0]);
-        return Ok(());
+    // Set up signal handler
+    let shutdown_event_clone = shutdown_event.clone();
+    let mut signals = Signals::new(&[SIGINT])?;
+
+    thread::spawn(move || {
+        for _ in signals.forever() {
+            println!("\nKeyboardInterrupt received. Shutting down...");
+            shutdown_event_clone.store(true, Ordering::SeqCst);
+        }
+    });
+
+    // Ensure correct number of arguments
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 3 {
+        eprintln!("Usage: {} <gps_input_path> <gps_output_path>", args[0]);
+        std::process::exit(1);
     }
 
-    let input_path = if args.len() > 1 {
-        &args[1]
-    } else {
-        DEFAULT_INPUT_PATH
-    };
+    let gps_input_path = &args[1];
+    let gps_output_path = &args[2];
 
-    let output_path = if args.len() > 2 {
-        &args[2]
-    } else {
-        DEFAULT_OUTPUT_PATH
-    };
+    // Initialize PTY handler
+    let mut pty_handler = PtyHandler::new(shutdown_event.clone());
+    pty_handler.setup_linked_ptys(gps_input_path, gps_output_path)?;
+    pty_handler.start_forwarding()?;
 
-    let mut simulator = NmeaSimulator::new();
-    simulator.start(input_path, output_path)?;
+    // Initialize NMEA generator
+    let mut nmea_generator = NmeaGenerator::new();
+
+    // Write NMEA messages to /tmp/gps_input
+    write_nmea_messages(gps_input_path, &mut nmea_generator, shutdown_event.clone())?;
+
+    // Perform cleanup
+    pty_handler.cleanup(gps_input_path, gps_output_path)?;
+
+    Ok(())
+}
+
+fn write_nmea_messages(
+    gps_input_path: &str,
+    nmea_generator: &mut NmeaGenerator,
+    shutdown_event: Arc<AtomicBool>,
+) -> Result<(), Box<dyn Error>> {
+    // Open the GPS input PTY for writing
+    println!("Opening GPS input path: {}", gps_input_path);
+    let gps_input = OpenOptions::new()
+        .write(true)
+        .open(gps_input_path)
+        .map_err(|e| {
+            eprintln!("Failed to open {}: {}", gps_input_path, e);
+            e
+        })?;
+
+    let mut writer = std::io::BufWriter::new(gps_input);
+
+    // Main loop to write NMEA messages
+    while !shutdown_event.load(Ordering::SeqCst) {
+        let sentence = nmea_generator.generate_sentences();
+        writer.write_all(sentence.as_bytes())?;
+        writer.flush()?;
+        println!("Sent to {}: {}", gps_input_path, sentence.trim());
+        thread::sleep(Duration::from_secs(1));
+    }
+
     Ok(())
 }
