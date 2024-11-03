@@ -1,4 +1,4 @@
-pub mod nmea_simulator;
+mod nmea_simulator;
 use nmea_simulator::NmeaSimulator;
 use std::env;
 use std::error::Error;
