@@ -4,20 +4,21 @@ use chrono::prelude::*;
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::ThreadRng;
 use rand::thread_rng;
-use std::env;
-use std::fs::OpenOptions;
-use std::io::{prelude::*, BufWriter};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::fs::{self, OpenOptions};
+use std::io::{prelude::*, BufWriter, ErrorKind};
+use std::os::unix::fs::symlink;
+use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::{ffi::CStr, ptr};
 
-use libc::{openpty, winsize};
+use libc::openpty;
 use nix::fcntl::{open, OFlag};
 use nix::sys::stat;
-use nix::unistd::{close, write};
+use nix::unistd::{close, read, write};
+use std::path::Path;
 
 use signal_hook::consts::SIGINT;
 use signal_hook::iterator::Signals;
@@ -25,32 +26,34 @@ use signal_hook::iterator::Signals;
 use std::error::Error;
 
 pub struct NmeaSimulator {
-    pipe_path: String,
-    serial_port: String,
-    interval: f64,
     shutdown_event: Arc<AtomicBool>,
+    master_fd1: Option<RawFd>,
+    master_fd2: Option<RawFd>,
+    forward_thread1: Option<thread::JoinHandle<()>>,
+    forward_thread2: Option<thread::JoinHandle<()>>,
     rng: ThreadRng,
-    master_fd: Option<RawFd>,
-    slave_name: Option<String>,
 }
 
 impl NmeaSimulator {
-    pub fn new(pipe_path: String, serial_port: String, interval: f64) -> Self {
+    pub fn new() -> Self {
         NmeaSimulator {
-            pipe_path,
-            serial_port,
-            interval,
             shutdown_event: Arc::new(AtomicBool::new(false)),
+            master_fd1: None,
+            master_fd2: None,
+            forward_thread1: None,
+            forward_thread2: None,
             rng: thread_rng(),
-            master_fd: None,
-            slave_name: None,
         }
     }
 
-    pub fn start(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn start(
+        &mut self,
+        gps_input_path: &str,
+        gps_output_path: &str,
+    ) -> Result<(), Box<dyn Error>> {
         // Set up signal handler
         let shutdown_event = self.shutdown_event.clone();
-        let mut signals = Signals::new(&[SIGINT])?;
+        let mut signals = Signals::new([SIGINT])?;
 
         // Spawn a thread to handle signals
         thread::spawn(move || {
@@ -60,66 +63,116 @@ impl NmeaSimulator {
             }
         });
 
-        if !self.serial_port.is_empty() {
-            println!("Using serial port: {}", self.serial_port);
-            self.serial_writer_serial()?;
-        } else if !self.pipe_path.is_empty() {
-            self.setup_named_pipe()?;
-            if self.shutdown_event.load(Ordering::SeqCst) {
-                return Ok(()); // Exit if setup failed
-            }
-            println!(
-                "Connect your GNSS-consuming application to the named pipe: {}",
-                self.pipe_path
-            );
-            self.serial_writer_pipe()?;
-        } else {
-            let slave_name = self.setup_pty()?;
-            if self.shutdown_event.load(Ordering::SeqCst) {
-                return Ok(()); // Exit if setup failed
-            }
-            println!("Connect your GNSS-consuming application to: {}", slave_name);
-            self.serial_writer_pty()?;
-        }
+        self.setup_linked_ptys(gps_input_path, gps_output_path)?;
 
-        self.cleanup();
+        self.start_forwarding()?;
+
+        self.write_nmea_messages(gps_output_path)?;
+
+        self.cleanup(gps_input_path, gps_output_path)?;
         Ok(())
     }
 
-    fn setup_named_pipe(&self) -> Result<(), Box<dyn Error>> {
-        use std::os::unix::fs::FileTypeExt;
-        use std::path::Path;
-        let pipe_path = Path::new(&self.pipe_path);
+    fn setup_linked_ptys(
+        &mut self,
+        gps_input_path: &str,
+        gps_output_path: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let (master_fd1, slave_name1) = self.create_pty()?;
+        println!("Master FD1: {}, Slave Name1: {}", master_fd1, slave_name1);
 
-        if !pipe_path.exists() {
-            match nix::unistd::mkfifo(pipe_path, stat::Mode::S_IRWXU) {
-                Ok(_) => println!("Named pipe created at: {}", self.pipe_path),
-                Err(e) => {
-                    eprintln!("Failed to create named pipe: {}", e);
-                    self.shutdown_event.store(true, Ordering::SeqCst);
-                    return Err(Box::new(e));
+        let (master_fd2, slave_name2) = self.create_pty()?;
+        println!("Master FD2: {}, Slave Name2: {}", master_fd2, slave_name2);
+
+        self.create_symlink(&slave_name1, gps_output_path)?;
+        self.create_symlink(&slave_name2, gps_input_path)?;
+
+        self.master_fd1 = Some(master_fd1);
+        self.master_fd2 = Some(master_fd2);
+
+        Ok(())
+    }
+
+    fn create_symlink(&self, target: &str, link: &str) -> Result<(), Box<dyn Error>> {
+        let link_path = Path::new(link);
+        if link_path.exists() {
+            fs::remove_file(link_path)?;
+        }
+        symlink(target, link)?;
+        Ok(())
+    }
+
+    fn start_forwarding(&mut self) -> Result<(), Box<dyn Error>> {
+        let shutdown_event = self.shutdown_event.clone();
+
+        let master_fd1 = self.master_fd1.unwrap();
+        let master_fd2 = self.master_fd2.unwrap();
+
+        // Forward data from master_fd2 to master_fd1
+        let shutdown_event_clone = shutdown_event.clone();
+        let forward_thread1 = thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            while !shutdown_event_clone.load(Ordering::SeqCst) {
+                match unsafe {
+                    libc::read(master_fd1, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                } {
+                    n if n > 0 => {
+                        let _ = unsafe {
+                            libc::write(master_fd2, buf.as_ptr() as *const libc::c_void, n as usize)
+                        };
+                    }
+                    0 => {}
+                    -1 => {
+                        let err = std::io::Error::last_os_error();
+                        if err.kind() == ErrorKind::Interrupted {
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
+                    _ => break,
                 }
             }
-        } else {
-            let metadata = std::fs::metadata(pipe_path)?;
-            if !metadata.file_type().is_fifo() {
-                eprintln!("Path exists and is not a FIFO: {}", self.pipe_path);
-                self.shutdown_event.store(true, Ordering::SeqCst);
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Path is not a FIFO",
-                )));
-            } else {
-                println!("Using existing named pipe: {}", self.pipe_path);
+            let _ = close(master_fd1);
+        });
+
+        let shutdown_event_clone = shutdown_event.clone();
+        let forward_thread2 = thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            while !shutdown_event_clone.load(Ordering::SeqCst) {
+                match unsafe {
+                    libc::read(master_fd2, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                } {
+                    n if n > 0 => {
+                        let _ = unsafe {
+                            libc::write(master_fd1, buf.as_ptr() as *const libc::c_void, n as usize)
+                        };
+                    }
+                    0 => {}
+                    -1 => {
+                        let err = std::io::Error::last_os_error();
+                        if err.kind() == ErrorKind::Interrupted {
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
             }
-        }
+            let _ = close(master_fd2);
+        });
+
+        self.forward_thread1 = Some(forward_thread1);
+        self.forward_thread2 = Some(forward_thread2);
+
         Ok(())
     }
 
-    fn setup_pty(&mut self) -> Result<String, Box<dyn Error>> {
+    fn create_pty(&self) -> Result<(RawFd, String), Box<dyn Error>> {
         let mut master_fd: i32 = 0;
         let mut slave_fd: i32 = 0;
-        let mut slave_name_buf = [0u8; 1024];
+        let mut slave_name_buf = [0u8; libc::PATH_MAX as usize];
 
         let result = unsafe {
             openpty(
@@ -133,7 +186,6 @@ impl NmeaSimulator {
 
         if result != 0 {
             eprintln!("Failed to create PTY");
-            self.shutdown_event.store(true, Ordering::SeqCst);
             return Err(Box::new(std::io::Error::last_os_error()));
         }
 
@@ -141,31 +193,43 @@ impl NmeaSimulator {
         let c_str = unsafe { CStr::from_ptr(slave_name_buf.as_ptr() as *const libc::c_char) };
         let slave_name = c_str.to_str()?.to_string();
 
-        self.master_fd = Some(master_fd);
-        self.slave_name = Some(slave_name.clone());
+        unsafe {
+            libc::close(slave_fd);
+        }
 
-        println!("Virtual serial port created at: {}", slave_name);
-        Ok(slave_name)
+        Ok((master_fd, slave_name))
     }
 
-    fn cleanup(&self) {
-        if !self.pipe_path.is_empty() {
-            use std::path::Path;
-            let pipe_path = Path::new(&self.pipe_path);
-            if pipe_path.exists() {
-                match std::fs::remove_file(pipe_path) {
-                    Ok(_) => println!("Named pipe removed: {}", self.pipe_path),
-                    Err(e) => eprintln!("Error removing named pipe: {}", e),
-                }
-            }
+    fn write_nmea_messages(&mut self, gps_input_path: &str) -> Result<(), Box<dyn Error>> {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        let gps_input = OpenOptions::new().write(true).open(gps_input_path)?;
+
+        let mut writer = BufWriter::new(gps_input);
+
+        while !self.shutdown_event.load(Ordering::SeqCst) {
+            let sentences = self.generate_all_sentences();
+            writer.write_all(sentences.as_bytes())?;
+            writer.flush()?;
+            println!("Sent to GPS input:\n{}", sentences);
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
 
-        if let Some(master_fd) = self.master_fd {
-            let _ = close(master_fd);
-            println!("PTY writer thread exiting.");
+        Ok(())
+    }
+
+    fn cleanup(&self, gps_input_path: &str, gps_output_path: &str) -> Result<(), Box<dyn Error>> {
+        if Path::new(gps_input_path).exists() {
+            fs::remove_file(gps_input_path)?;
         }
 
-        println!("NmeaSimulator exited gracefully.");
+        if Path::new(gps_output_path).exists() {
+            fs::remove_file(gps_output_path)?;
+        }
+
+        println!("Cleaned up symlink links.");
+        Ok(())
     }
 
     // Random uniform double
@@ -217,6 +281,11 @@ impl NmeaSimulator {
         format!("{:02X}", checksum)
     }
 
+    fn complete_nmea_sentence(&self, sentence: &str) -> String {
+        let checksum = self.calculate_checksum(sentence);
+        format!("${}*{}\r\n", sentence, checksum)
+    }
+
     fn generate_gpgga(&mut self, loc: &LocationData, num_satellites: i32) -> String {
         let utc_time = self.get_utc_time();
         let fix_quality = self.random_int(0, 5);
@@ -237,8 +306,7 @@ impl NmeaSimulator {
             altitude,
             geoid_sep
         );
-        let checksum = self.calculate_checksum(&body);
-        format!("${}*{}\r\n", body, checksum)
+        self.complete_nmea_sentence(&body)
     }
 
     fn generate_gprmc(&mut self, loc: &LocationData) -> String {
@@ -263,6 +331,32 @@ impl NmeaSimulator {
         format!("${}*{}\r\n", body, checksum)
     }
 
+    fn generate_gpgsa(&mut self, satellites: &Vec<u16>) -> String {
+        static MODES: [char; 2] = ['M', 'A'];
+        let fix_mode = MODES[self.random_int(0, 1) as usize];
+        let mode = self.random_int(1, 3);
+        let mut sv_id_str = String::new();
+        sv_id_str.push_str(
+            satellites
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<String>>()
+                .join(",")
+                .as_str(),
+        );
+        for _ in 0..(12 - satellites.len()) {
+            sv_id_str.push_str(",");
+        }
+
+        let pdop = self.random_uniform(1.0, 10.0);
+        let hdop = self.random_uniform(1.0, 10.0);
+        let vdop = self.random_uniform(1.0, 10.0);
+
+        let body = format!("GPGSA,{mode},{fix_mode},{sv_id_str},{pdop},{hdop},{vdop}");
+
+        self.complete_nmea_sentence(&body)
+    }
+
     fn generate_gpgll(&mut self, loc: &LocationData) -> String {
         let utc_time = self.get_utc_time();
 
@@ -283,70 +377,6 @@ impl NmeaSimulator {
         sentences.push_str(&self.generate_gpgll(&loc));
         // You can implement and add other sentences similarly
         sentences
-    }
-
-    fn serial_writer_pipe(&mut self) -> Result<(), Box<dyn Error>> {
-        while !self.shutdown_event.load(Ordering::SeqCst) {
-            let pipe = OpenOptions::new().write(true).open(&self.pipe_path)?;
-            let mut writer = BufWriter::new(pipe);
-            while !self.shutdown_event.load(Ordering::SeqCst) {
-                let sentences = self.generate_all_sentences();
-                writer.write_all(sentences.as_bytes())?;
-                writer.flush()?;
-                println!("Sent to pipe:\n{}", sentences);
-                thread::sleep(Duration::from_secs_f64(self.interval));
-            }
-        }
-        println!("Pipe writer thread exiting.");
-        Ok(())
-    }
-
-    fn serial_writer_serial(&mut self) -> Result<(), Box<dyn Error>> {
-        let fd = open(
-            self.serial_port.as_str(),
-            OFlag::O_WRONLY | OFlag::O_NOCTTY,
-            stat::Mode::empty(),
-        )?;
-        while !self.shutdown_event.load(Ordering::SeqCst) {
-            let sentences = self.generate_all_sentences();
-            let bytes_written = write(fd, sentences.as_bytes())?;
-            if bytes_written == 0 {
-                eprintln!("Error writing to serial port: {}", self.serial_port);
-                break;
-            }
-            println!("Sent to serial port:\n{}", sentences);
-            thread::sleep(Duration::from_secs_f64(self.interval));
-        }
-        close(fd)?;
-        println!("Serial port writer thread exiting.");
-        Ok(())
-    }
-
-    fn serial_writer_pty(&mut self) -> Result<(), Box<dyn Error>> {
-        if let Some(master_fd) = self.master_fd {
-            while !self.shutdown_event.load(Ordering::SeqCst) {
-                let sentences = self.generate_all_sentences();
-                let bytes_written = unsafe {
-                    libc::write(
-                        master_fd,
-                        sentences.as_ptr() as *const libc::c_void,
-                        sentences.len(),
-                    )
-                };
-                if bytes_written == -1 {
-                    eprintln!("Error writing to PTY");
-                    self.shutdown_event.store(true, Ordering::SeqCst);
-                    break;
-                }
-                println!("Sent to PTY:\n{}", sentences);
-                thread::sleep(Duration::from_secs_f64(self.interval));
-            }
-            unsafe {
-                libc::close(master_fd);
-            }
-            println!("PTY writer thread exiting.");
-        }
-        Ok(())
     }
 }
 

@@ -3,42 +3,38 @@ use nmea_simulator::NmeaSimulator;
 use std::env;
 use std::error::Error;
 
+fn print_help_msg(program_name: &str) {
+    println!(
+        "Usage: {} [input_file] [output_file]
+        -h, --help  Display this help message",
+        program_name
+    );
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();
+    const DEFAULT_INPUT_PATH: &str = "/tmp/gps_input";
+    const DEFAULT_OUTPUT_PATH: &str = "/tmp/gps_output";
 
-    // Default values
-    let mut pipe_path = String::new();
-    let mut serial_port = String::new();
-    let mut interval = 1.0;
-
-    // Simple argument parsing
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--pipe" => {
-                if i + 1 < args.len() {
-                    pipe_path = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--serial" => {
-                if i + 1 < args.len() {
-                    serial_port = args[i + 1].clone();
-                    i += 1;
-                }
-            }
-            "--interval" => {
-                if i + 1 < args.len() {
-                    interval = args[i + 1].parse::<f64>().unwrap_or(1.0);
-                    i += 1;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
+    if args.len() == 2 && (args[1] == "-h" || args[1] == "--help") {
+        print_help_msg(&args[0]);
+        return Ok(());
     }
 
-    let mut simulator = NmeaSimulator::new(pipe_path, serial_port, interval);
-    simulator.start()
+    let input_path = if args.len() > 1 {
+        &args[1]
+    } else {
+        DEFAULT_INPUT_PATH
+    };
+
+    let output_path = if args.len() > 2 {
+        &args[2]
+    } else {
+        DEFAULT_OUTPUT_PATH
+    };
+
+    let mut simulator = NmeaSimulator::new();
+    simulator.start(input_path, output_path)?;
+    Ok(())
 }
