@@ -50,7 +50,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut nmea_generator = NmeaGenerator::new();
 
     // Write NMEA messages to /tmp/gps_input
-    write_nmea_messages(gps_input_path, &mut nmea_generator, shutdown_event.clone())?;
+    if let Err(e) = write_nmea_messages(gps_input_path, &mut nmea_generator, shutdown_event.clone())
+    {
+        eprintln!("Error writing NMEA messages: {}", e);
+    }
 
     // Perform cleanup
     pty_handler.cleanup(gps_input_path, gps_output_path)?;
@@ -80,7 +83,7 @@ fn write_nmea_messages(
         let sentence = nmea_generator.generate_sentences();
         writer.write_all(sentence.as_bytes())?;
         writer.flush()?;
-        println!("Sent to {}: {}", gps_input_path, sentence.trim());
+        println!("Sent to {}:\n{}", gps_input_path, sentence.trim());
         thread::sleep(Duration::from_secs(1));
     }
 

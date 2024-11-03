@@ -1,14 +1,14 @@
 // src/pty_handler.rs
 
-use libc::{openpty, ptsname};
-use nix::unistd::{close, read, write};
+use libc::{close as libc_close, openpty, ptsname};
+use nix::unistd::close;
 use std::error::Error;
 use std::ffi::CStr;
 use std::fs;
-use std::fs::OpenOptions;
 use std::io::ErrorKind;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::symlink;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::ptr;
 use std::sync::{
@@ -59,7 +59,7 @@ impl PtyHandler {
         self.create_symlink(&slave_name2, gps_output_path)?;
 
         // Open the slave ends to keep them open
-        let slave_fd1 = OpenOptions::new()
+        let slave_fd1 = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(gps_input_path)
@@ -71,7 +71,7 @@ impl PtyHandler {
         self.slave_fd1 = Some(slave_fd1);
         println!("Opened gps_input_path: {}", gps_input_path);
 
-        let slave_fd2 = OpenOptions::new()
+        let slave_fd2 = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(gps_output_path)
@@ -121,7 +121,7 @@ impl PtyHandler {
 
         // Close the slave FD as we don't need it here
         unsafe {
-            libc::close(slave_fd);
+            libc_close(slave_fd);
         }
 
         Ok((master_fd, slave_name))
@@ -140,8 +140,8 @@ impl PtyHandler {
     pub fn start_forwarding(&mut self) -> Result<(), Box<dyn Error>> {
         let shutdown_event = self.shutdown_event.clone();
 
-        let master_fd1 = self.master_fd1.unwrap();
-        let master_fd2 = self.master_fd2.unwrap();
+        let master_fd1 = self.master_fd1.ok_or("master_fd1 not set")?;
+        let master_fd2 = self.master_fd2.ok_or("master_fd2 not set")?;
 
         // Forward data from master_fd1 to master_fd2
         let shutdown_event_clone = shutdown_event.clone();
@@ -162,6 +162,7 @@ impl PtyHandler {
                         if err.kind() == ErrorKind::Interrupted {
                             continue;
                         } else {
+                            eprintln!("Error in forwarding_thread1: {}", err);
                             break;
                         }
                     }
@@ -169,6 +170,7 @@ impl PtyHandler {
                 }
             }
             let _ = close(master_fd1);
+            println!("Forwarding thread 1 exiting.");
         });
 
         // Forward data from master_fd2 to master_fd1
@@ -190,6 +192,7 @@ impl PtyHandler {
                         if err.kind() == ErrorKind::Interrupted {
                             continue;
                         } else {
+                            eprintln!("Error in forwarding_thread2: {}", err);
                             break;
                         }
                     }
@@ -197,6 +200,7 @@ impl PtyHandler {
                 }
             }
             let _ = close(master_fd2);
+            println!("Forwarding thread 2 exiting.");
         });
 
         // Store the forwarding threads so we can join them later
