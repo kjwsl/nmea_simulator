@@ -81,9 +81,15 @@ fn write_nmea_messages(
     // Main loop to write NMEA messages
     while !shutdown_event.load(Ordering::SeqCst) {
         let sentence = nmea_generator.generate_sentences();
-        writer.write_all(sentence.as_bytes())?;
-        writer.flush()?;
-        println!("Sent to {}:\n{}", gps_input_path, sentence.trim());
+        if let Err(e) = writer.write_all(sentence.as_bytes()) {
+            eprintln!("Error writing to {}: {}", gps_input_path, e);
+            break;
+        }
+        if let Err(e) = writer.flush() {
+            eprintln!("Error flushing to {}: {}", gps_input_path, e);
+            break;
+        }
+        println!("Sent to {}: {}", gps_input_path, sentence.trim());
         thread::sleep(Duration::from_secs(1));
     }
 

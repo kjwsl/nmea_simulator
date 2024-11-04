@@ -1,14 +1,14 @@
 // src/pty_handler.rs
 
-use libc::{close as libc_close, openpty, ptsname};
-use nix::unistd::close;
+use libc::{close, openpty, ptsname};
+use nix::unistd::close as nix_close;
 use std::error::Error;
 use std::ffi::CStr;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::ErrorKind;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::symlink;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
 use std::ptr;
 use std::sync::{
@@ -59,7 +59,7 @@ impl PtyHandler {
         self.create_symlink(&slave_name2, gps_output_path)?;
 
         // Open the slave ends to keep them open
-        let slave_fd1 = std::fs::OpenOptions::new()
+        let slave_fd1 = OpenOptions::new()
             .read(true)
             .write(true)
             .open(gps_input_path)
@@ -71,7 +71,7 @@ impl PtyHandler {
         self.slave_fd1 = Some(slave_fd1);
         println!("Opened gps_input_path: {}", gps_input_path);
 
-        let slave_fd2 = std::fs::OpenOptions::new()
+        let slave_fd2 = OpenOptions::new()
             .read(true)
             .write(true)
             .open(gps_output_path)
@@ -121,7 +121,7 @@ impl PtyHandler {
 
         // Close the slave FD as we don't need it here
         unsafe {
-            libc_close(slave_fd);
+            libc::close(slave_fd);
         }
 
         Ok((master_fd, slave_name))
@@ -140,67 +140,91 @@ impl PtyHandler {
     pub fn start_forwarding(&mut self) -> Result<(), Box<dyn Error>> {
         let shutdown_event = self.shutdown_event.clone();
 
-        let master_fd1 = self.master_fd1.ok_or("master_fd1 not set")?;
-        let master_fd2 = self.master_fd2.ok_or("master_fd2 not set")?;
+        let master_fd1 = self.master_fd1.unwrap();
+        let master_fd2 = self.master_fd2.unwrap();
 
         // Forward data from master_fd1 to master_fd2
         let shutdown_event_clone = shutdown_event.clone();
         let forward_thread1 = thread::spawn(move || {
             let mut buf = [0u8; 1024];
-            while !shutdown_event_clone.load(Ordering::SeqCst) {
+            loop {
+                if shutdown_event_clone.load(Ordering::SeqCst) {
+                    break;
+                }
                 match unsafe {
                     libc::read(master_fd1, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
                 } {
                     n if n > 0 => {
-                        let _ = unsafe {
+                        let write_result = unsafe {
                             libc::write(master_fd2, buf.as_ptr() as *const libc::c_void, n as usize)
                         };
+                        if write_result == -1 {
+                            let err = std::io::Error::last_os_error();
+                            eprintln!("Error writing to master_fd2: {}", err);
+                            break;
+                        }
                     }
-                    0 => {}
+                    0 => {
+                        // EOF reached
+                        println!("EOF on master_fd1");
+                        break;
+                    }
                     -1 => {
                         let err = std::io::Error::last_os_error();
                         if err.kind() == ErrorKind::Interrupted {
                             continue;
                         } else {
-                            eprintln!("Error in forwarding_thread1: {}", err);
+                            eprintln!("Error reading from master_fd1: {}", err);
                             break;
                         }
                     }
                     _ => break,
                 }
             }
-            let _ = close(master_fd1);
-            println!("Forwarding thread 1 exiting.");
+            println!("Forwarding thread1 exiting.");
+            // Do not close master_fd1 here
         });
 
         // Forward data from master_fd2 to master_fd1
         let shutdown_event_clone = shutdown_event.clone();
         let forward_thread2 = thread::spawn(move || {
             let mut buf = [0u8; 1024];
-            while !shutdown_event_clone.load(Ordering::SeqCst) {
+            loop {
+                if shutdown_event_clone.load(Ordering::SeqCst) {
+                    break;
+                }
                 match unsafe {
                     libc::read(master_fd2, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
                 } {
                     n if n > 0 => {
-                        let _ = unsafe {
+                        let write_result = unsafe {
                             libc::write(master_fd1, buf.as_ptr() as *const libc::c_void, n as usize)
                         };
+                        if write_result == -1 {
+                            let err = std::io::Error::last_os_error();
+                            eprintln!("Error writing to master_fd1: {}", err);
+                            break;
+                        }
                     }
-                    0 => {}
+                    0 => {
+                        // EOF reached
+                        println!("EOF on master_fd2");
+                        break;
+                    }
                     -1 => {
                         let err = std::io::Error::last_os_error();
                         if err.kind() == ErrorKind::Interrupted {
                             continue;
                         } else {
-                            eprintln!("Error in forwarding_thread2: {}", err);
+                            eprintln!("Error reading from master_fd2: {}", err);
                             break;
                         }
                     }
                     _ => break,
                 }
             }
-            let _ = close(master_fd2);
-            println!("Forwarding thread 2 exiting.");
+            println!("Forwarding thread2 exiting.");
+            // Do not close master_fd2 here
         });
 
         // Store the forwarding threads so we can join them later
@@ -215,6 +239,9 @@ impl PtyHandler {
         gps_input_path: &str,
         gps_output_path: &str,
     ) -> Result<(), Box<dyn Error>> {
+        // Signal forwarding threads to shutdown
+        self.shutdown_event.store(true, Ordering::SeqCst);
+
         // Wait for forwarding threads to finish
         if let Some(thread) = self.forward_thread1.take() {
             let _ = thread.join();
@@ -234,12 +261,22 @@ impl PtyHandler {
 
         // Close the slave FDs
         if let Some(slave_fd1) = self.slave_fd1.take() {
-            let _ = close(slave_fd1);
+            let _ = nix_close(slave_fd1);
             println!("Closed slave_fd1");
         }
         if let Some(slave_fd2) = self.slave_fd2.take() {
-            let _ = close(slave_fd2);
+            let _ = nix_close(slave_fd2);
             println!("Closed slave_fd2");
+        }
+
+        // Close master FDs
+        if let Some(master_fd1) = self.master_fd1.take() {
+            let _ = nix_close(master_fd1);
+            println!("Closed master_fd1");
+        }
+        if let Some(master_fd2) = self.master_fd2.take() {
+            let _ = nix_close(master_fd2);
+            println!("Closed master_fd2");
         }
 
         Ok(())

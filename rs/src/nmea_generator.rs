@@ -1,6 +1,4 @@
-// src/nmea_generator.rs
-
-use chrono::prelude::*;
+use chrono::Utc;
 use rand::{
     distributions::{Distribution, Uniform},
     rngs::ThreadRng,
@@ -22,7 +20,7 @@ impl RandomGenerator {
     }
 
     pub fn random_int(&mut self, min: i32, max: i32) -> i32 {
-        let range = Uniform::from(min..max);
+        let range = Uniform::from(min..=max);
         range.sample(&mut self.rng)
     }
 }
@@ -34,10 +32,16 @@ struct Satellite {
 }
 
 impl Satellite {
-    // Removed the unused `new` function.
+    pub fn new(constell: Constellation, id: u16) -> Self {
+        Satellite {
+            constellation: constell,
+            id,
+        }
+    }
+
     pub fn new_random() -> Self {
         let mut rg = RandomGenerator::new();
-        let constell = Constellation::get_random();
+        let constell = Constellation::get_random(&mut rg);
         let id = match constell {
             Constellation::GPS => rg.random_int(1, 32),
             Constellation::GLONASS => rg.random_int(65, 96),
@@ -62,7 +66,15 @@ pub enum Constellation {
 }
 
 impl Constellation {
-    // Removed the unused `to_string` method.
+    pub fn to_string(&self) -> String {
+        match self {
+            Constellation::GPS => "GPS".to_string(),
+            Constellation::GLONASS => "GLONASS".to_string(),
+            Constellation::GALILEO => "GALILEO".to_string(),
+            Constellation::BEIDOU => "BEIDOU".to_string(),
+            Constellation::QZSS => "QZSS".to_string(),
+        }
+    }
     pub fn to_code(&self) -> String {
         match self {
             Constellation::GPS => "GP".to_string(),
@@ -77,10 +89,9 @@ impl Constellation {
         5 // Number of constellations
     }
 
-    pub fn get_random() -> Self {
-        let mut rng = thread_rng();
+    pub fn get_random(rg: &mut RandomGenerator) -> Self {
         let range = Uniform::from(0..Constellation::len());
-        let index = range.sample(&mut rng);
+        let index = range.sample(&mut rg.rng);
 
         match index {
             0 => Constellation::GPS,
@@ -123,9 +134,9 @@ impl NmeaGenerator {
         let lon_min = (longitude.abs() - lon_deg) * 60.0;
 
         LocationData {
-            latitude: format!("{:02}{:07.4}", lat_deg, lat_min),
+            latitude: format!("{:02}{:07.4}", lat_deg as u32, lat_min),
             ns,
-            longitude: format!("{:03}{:07.4}", lon_deg, lon_min),
+            longitude: format!("{:03}{:07.4}", lon_deg as u32, lon_min),
             ew,
         }
     }
@@ -142,8 +153,8 @@ impl NmeaGenerator {
 
     fn calculate_checksum(&self, sentence: &str) -> String {
         let mut checksum: u8 = 0;
-        for byte in sentence.bytes() {
-            checksum ^= byte;
+        for c in sentence.as_bytes() {
+            checksum ^= c;
         }
 
         format!("{:02X}", checksum)
@@ -237,37 +248,46 @@ impl NmeaGenerator {
             }
 
             let constell = constellations[0].constellation.to_code();
-            let mut sats_str = constellations
+            let sats_str = constellations
                 .iter()
                 .map(|sat| sat.id.to_string())
                 .collect::<Vec<String>>()
                 .join(",");
 
+            // Pad the satellite IDs to have 12 fields
+            let mut sats_str_padded = sats_str;
             for _ in constellations.len()..12 {
-                sats_str.push(',');
+                sats_str_padded.push(',');
             }
 
-            let sentence = self.complete_sentence(
-                format!("{constell}GSA,{mode},{fix_type},{sats_str},{pdop:.1},{hdop:.1},{vdop:.1}")
-                    .as_str(),
+            let sentence = format!(
+                "{constell}GSA,{mode},{fix_type},{sats_str_padded},{pdop:.1},{hdop:.1},{vdop:.1}",
+                constell = constell,
+                mode = mode,
+                fix_type = fix_type,
+                sats_str_padded = sats_str_padded,
+                pdop = pdop,
+                hdop = hdop,
+                vdop = vdop
             );
-            msgs.push(sentence);
+
+            msgs.push(self.complete_sentence(&sentence));
         }
 
         msgs.join("")
     }
 
     fn generate_gsv(&mut self, satellites: &[Satellite]) -> String {
-        if satellites.is_empty() {
-            return String::new();
-        }
-
-        let num_msgs = ((satellites.len() + 3) / 4).min(16); // Max 4 satellites per GSV message
+        let num_msgs = (satellites.len() + 3) / 4; // Each GSV message can contain up to 4 satellites
         let mut msgs = Vec::new();
 
         for i in 0..num_msgs {
             let start = i * 4;
-            let end = ((i + 1) * 4).min(satellites.len());
+            let end = if i == num_msgs - 1 {
+                satellites.len()
+            } else {
+                (i + 1) * 4
+            };
             let sats = &satellites[start..end];
 
             let num_sats = sats.len();
@@ -277,7 +297,7 @@ impl NmeaGenerator {
 
             let mut sats_str = String::new();
             for sat in sats {
-                sats_str.push_str(&format!("{},{},{},", sat.id, 0, 0)); // SNR and elevation are set to 0 for simplicity
+                sats_str.push_str(&format!("{},{},{},", sat.id, 0, 0)); // Elevation and Azimuth set to 0 for simplicity
             }
 
             let sentence = format!(
