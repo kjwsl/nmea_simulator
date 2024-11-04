@@ -6,7 +6,7 @@ add_compile_options(-lphtread -lutil)
 
 add_custom_target(
   run
-  COMMAND ./nmea_simulator --serial /tmp/gps_input
+  COMMAND ./nmea_simulator --link /tmp/ttyGPS
   DEPENDS nmea_simulator
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
