@@ -2,6 +2,7 @@
 #include "NmeaSimulator.hpp"
 
 #include <chrono>
+#include <cstring>
 #include <ctime>
 #include <fcntl.h>
 #include <fstream>
@@ -21,13 +22,14 @@ NmeaSimulator* NmeaSimulator::instance_ = nullptr;
 
 // Constructor
 NmeaSimulator::NmeaSimulator(const std::string& pipe_path, const std::string& serial_port,
-                             double interval)
+                             double interval, const std::string& symlink_path)
     : pipe_path_(pipe_path)
     , serial_port_(serial_port)
     , interval_(interval)
     , shutdown_event_(false)
     , rng_(std::random_device {}())
     , master_fd_(-1)
+    , symlink_path_(symlink_path)
 {
 }
 
@@ -77,7 +79,7 @@ void NmeaSimulator::start()
         setupPTY();
         if (shutdown_event_.load())
             return; // Exit if setup failed
-        std::cout << "Connect your GNSS-consuming application to: " << slave_name_ << std::endl;
+        // The setupPTY now already prints the symlink path
         writer_thread_ = std::thread(&NmeaSimulator::serialWriterPTY, this, master_fd_, interval_);
     }
 
@@ -109,27 +111,23 @@ void NmeaSimulator::setupNamedPipe()
     }
 }
 
-// Setup PTY
-void NmeaSimulator::setupPTY()
-{
-    char slave_name_buffer[256];
-    if (openpty(&master_fd_, nullptr, slave_name_buffer, nullptr, nullptr) == -1) {
-        std::cerr << "Failed to create virtual serial port" << std::endl;
-        shutdown_event_.store(true);
-        return;
-    }
-    slave_name_ = slave_name_buffer;
-    std::cout << "Virtual serial port created at: " << slave_name_ << std::endl;
-}
-
 // Cleanup resources
 void NmeaSimulator::cleanup()
 {
     if (!pipe_path_.empty() && access(pipe_path_.c_str(), F_OK) != -1) {
         if (unlink(pipe_path_.c_str()) != 0) {
-            std::cerr << "Error removing named pipe: " << pipe_path_ << std::endl;
+            std::cerr << "Error removing named pipe: " << pipe_path_.c_str() << std::endl;
         } else {
-            std::cout << "Named pipe removed: " << pipe_path_ << std::endl;
+            std::cout << "Named pipe removed: " << pipe_path_.c_str() << std::endl;
+        }
+    }
+
+    if (!symlink_path_.empty()) {
+        // Remove the symbolic link
+        if (unlink(symlink_path_.c_str()) != 0) {
+            std::cerr << "Error removing symbolic link: " << symlink_path_.c_str() << std::endl;
+        } else {
+            std::cout << "Symbolic link removed: " << symlink_path_.c_str() << std::endl;
         }
     }
 
@@ -578,4 +576,86 @@ std::string NmeaSimulator::generateGxGSV(const std::vector<SatelliteInfo>& satel
     }
 
     return gsv_sentences.str();
+}
+
+void NmeaSimulator::setupPTY()
+{
+    char slave_name_buffer[256];
+    struct termios tty;
+    int slave_fd = -1; // Variable to store slave file descriptor
+
+    // Create PTY master and slave
+    if (openpty(&master_fd_, &slave_fd, slave_name_buffer, nullptr, nullptr) == -1) {
+        std::cerr << "Failed to create virtual serial port: " << strerror(errno) << std::endl;
+        shutdown_event_.store(true);
+        return;
+    }
+
+    slave_name_ = slave_name_buffer;
+    std::cout << "Virtual serial port created at: " << slave_name_ << std::endl;
+
+    // Configure the slave PTY as a serial port
+    if (tcgetattr(slave_fd, &tty) == -1) {
+        std::cerr << "Failed to get terminal attributes: " << strerror(errno) << std::endl;
+        close(slave_fd);
+        shutdown_event_.store(true);
+        return;
+    }
+
+    // Configure serial port settings (example: 9600 baud, 8N1)
+    cfsetispeed(&tty, B9600);
+    cfsetospeed(&tty, B9600);
+
+    tty.c_cflag &= ~PARENB; // No parity
+    tty.c_cflag &= ~CSTOPB; // 1 stop bit
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8; // 8 data bits
+    tty.c_cflag &= ~CRTSCTS; // No hardware flow control
+    tty.c_cflag |= CREAD | CLOCAL; // Enable receiver, ignore modem control lines
+
+    tty.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG); // Raw input
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY); // No software flow control
+    tty.c_oflag &= ~OPOST; // Raw output
+
+    if (tcsetattr(slave_fd, TCSANOW, &tty) == -1) {
+        std::cerr << "Failed to set terminal attributes: " << strerror(errno) << std::endl;
+        close(slave_fd);
+        shutdown_event_.store(true);
+        return;
+    }
+
+    close(slave_fd); // Configuration done
+
+    // Create a symbolic link for the slave PTY
+    // Remove existing symlink if it exists
+    if (!symlink_path_.empty()) {
+        if (unlink(symlink_path_.c_str()) != 0 && errno != ENOENT) {
+            std::cerr << "Warning: Failed to remove existing symbolic link: "
+                      << symlink_path_ << " (" << strerror(errno) << ")" << std::endl;
+        }
+    }
+
+    // Attempt to create the symlink with retries
+    int retries = 3;
+    while (retries > 0) {
+        if (symlink(slave_name_.c_str(), symlink_path_.c_str()) == 0) {
+            std::cout << "Symbolic link created at: " << symlink_path_ << std::endl;
+            break;
+        } else {
+            std::cerr << "Failed to create symbolic link: " << symlink_path_
+                      << " (" << strerror(errno) << ")" << std::endl;
+            retries--;
+            if (retries > 0) {
+                std::cerr << "Retrying in 1 second..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            } else {
+                std::cerr << "Exceeded maximum retries. Continuing without symlink." << std::endl;
+                break;
+            }
+        }
+    }
+
+    // Inform the user about the symlink
+    std::cout << "Connect your GNSS-consuming application to the virtual serial port: "
+              << symlink_path_ << std::endl;
 }

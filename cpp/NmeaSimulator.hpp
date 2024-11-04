@@ -25,7 +25,7 @@ struct SatelliteInfo {
 class NmeaSimulator {
 public:
     // Constructor
-    NmeaSimulator(const std::string& pipe_path, const std::string& serial_port, double interval);
+    NmeaSimulator(const std::string& pipe_path, const std::string& serial_port, double interval, const std::string& symlink_path = "/tmp/ttySIMULATOR");
 
     // Destructor
     ~NmeaSimulator();
@@ -35,6 +35,7 @@ public:
 
 private:
     // Configuration parameters
+    std::string symlink_path_;
     std::string pipe_path_;
     std::string serial_port_;
     double interval_;
