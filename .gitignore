@@ -12,3 +12,5 @@ pyvenv.cfg
 pip-selfcheck.json
 rs/target
 cpp/build
+**/.cache
+
