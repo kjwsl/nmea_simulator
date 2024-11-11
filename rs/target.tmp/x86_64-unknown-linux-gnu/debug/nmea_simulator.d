@@ -1,1 +1,0 @@
-/home/ray/projects/rpi5/aosp/device/brcm/rpi5/nmea_simulator/rs/target.tmp/x86_64-unknown-linux-gnu/debug/nmea_simulator: /home/ray/projects/rpi5/aosp/device/brcm/rpi5/nmea_simulator/rs/src/main.rs /home/ray/projects/rpi5/aosp/device/brcm/rpi5/nmea_simulator/rs/src/nmea_generator.rs /home/ray/projects/rpi5/aosp/device/brcm/rpi5/nmea_simulator/rs/src/pty_handler.rs

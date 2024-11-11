@@ -2,8 +2,7 @@ project(NmeaSimulator)
 add_executable(nmea_simulator main.cpp NmeaGenerator.cpp NmeaSimulator.cpp
                               PtyHandler.cpp)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-add_compile_options(-lphtread -lutil)
-# target_link_libraries(nmea_simulator pthread util)
+target_link_libraries(nmea_simulator pthread util)
 
 add_custom_target(
   run
