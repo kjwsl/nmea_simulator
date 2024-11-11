@@ -9,8 +9,11 @@ prebuilt_etc {
 cc_binary {
     name: "nmea_simulator",
     vendor: true,
+    local_include_dirs: ["."],
     srcs: [
         "NmeaSimulator.cpp",
+        "NmeaGenerator.cpp",
+        "PtyHandler.cpp",
         "main.cpp",
     ],
     installable: true,
