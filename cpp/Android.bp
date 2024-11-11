@@ -1,3 +1,11 @@
+prebuilt_etc {
+    name: "nmea_log",
+    vendor: true,
+    src: "nmea.log",
+    sub_dir: "etc",
+    installable: true,
+}
+
 cc_binary {
     name: "nmea_simulator",
     vendor: true,
