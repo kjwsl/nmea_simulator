@@ -65,7 +65,7 @@ private:
     std::string generateGPGLL(const LocationData& loc);
     std::string generateGPGSA(const std::vector<SatelliteInfo>& satellites);
     std::string generateGxGSV(const std::vector<SatelliteInfo>& satellites, Constellation constellation);
-    std::string generateNFIMU(const LocationData& loc);
+    std::string generateNFIMU();
 
     // Generate multiple GSV sentences for all constellations
     std::string generateGPGSV(const std::vector<SatelliteInfo>& satellites);

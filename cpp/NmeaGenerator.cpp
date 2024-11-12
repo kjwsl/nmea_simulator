@@ -280,7 +280,7 @@ std::string NmeaGenerator::generateGxGSV(const std::vector<SatelliteInfo>& satel
 }
 
 // Generate NFIMU sentence
-std::string NmeaGenerator::generateNFIMU(const LocationData& loc)
+std::string NmeaGenerator::generateNFIMU()
 {
     int calibration_status = randomInt(0, 1);
     double temperature     = randomUniform(10, 80);
