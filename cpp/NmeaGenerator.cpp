@@ -350,6 +350,6 @@ std::string NmeaGenerator::generateAllSentences()
     }
 
     all_sentences << generateGPGLL(loc);
-    all_sentences << generateNFIMU(loc);
+    all_sentences << generateNFIMU();
     return all_sentences.str();
 }
